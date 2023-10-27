@@ -38,6 +38,9 @@ unsigned long intervalWiFi = 10000;
 unsigned long intervalMQTT = 10000;
 bool AIOconnected = false;
 
+unsigned long intervalPublish = 10000;
+unsigned long lastPublish = millis() - (intervalPublish / 2);
+
 #ifdef DEBUG
 twai_message_t d_msg;
 #endif
@@ -77,18 +80,20 @@ void setup() {
 void loop() {
   connect_wifi_and_mqtt();
   // shutdown_counter();
+
   if (!AIOconnected) {
     delay(100);
-  } else {
-    can_read();
-    mqtt.loop();
+    return;
+  }
+  
+  can_read();
+  mqtt.loop();
 
 #ifdef DEBUG
-    d_msg.data[0] += 1;
-    can_publish(&d_msg);
-    delay(1000);
+  d_msg.data[0] += 1;
+  can_publish(&d_msg);
+  delay(1000);
 #endif
-  }
 }
 
 void can_publish(twai_message_t* msg) {
@@ -103,6 +108,8 @@ void can_publish(twai_message_t* msg) {
   mqtt.publish(topic, (const uint8_t*)&payload, msg->data_length_code * 2, true);
 }
 
+twai_message_t msg_buffer[9] = { 0 };
+
 void can_read() {
   twai_message_t msg;
 
@@ -110,9 +117,36 @@ void can_read() {
     return;
   }
 
-  if (
-    msg.identifier != 0x286 && msg.identifier != 0x697 && msg.identifier != 0x373 && msg.identifier != 0x374 && msg.identifier != 0x389 && msg.identifier != 0x6E1 && msg.identifier != 0x6E2 && msg.identifier != 0x6E3 && msg.identifier != 0x6E4) {
-    return;
+  switch (msg.identifier) {
+    case 0x286:
+      msg_buffer[0] = msg;
+      break;
+    case 0x697:
+      msg_buffer[1] = msg;
+      break;
+    case 0x373:
+      msg_buffer[2] = msg;
+      break;
+    case 0x374:
+      msg_buffer[3] = msg;
+      break;
+    case 0x389:
+      msg_buffer[4] = msg;
+      break;
+    case 0x6E1:
+      msg_buffer[5] = msg;
+      break;
+    case 0x6E2:
+      msg_buffer[6] = msg;
+      break;
+    case 0x6E3:
+      msg_buffer[7] = msg;
+      break;
+    case 0x6E4:
+      msg_buffer[8] = msg;
+      break;
+    default:
+      return;
   }
 
   Serial.print("0x");
@@ -133,7 +167,22 @@ void can_read() {
   }
   Serial.println();
 
-  can_publish(&msg);
+  if (lastPublish > millis()) lastPublish = millis();
+  if (millis() - lastPublish < intervalPublish) {
+    return;
+  }
+  lastPublish = millis();
+
+  Serial.println("Publishing to MQTT:");
+  for (int i = 0; i < 9; i++) {
+    if (msg_buffer[i].identifier != 0) {
+      Serial.print("0x");
+      Serial.print(msg_buffer[i].identifier, HEX);
+      Serial.println();
+      can_publish(&msg_buffer[i]);
+      msg_buffer[i].identifier = 0;
+    }
+  }
 }
 
 void shutdown_counter() {
