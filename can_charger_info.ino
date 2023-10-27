@@ -77,16 +77,21 @@ void setup() {
 #endif
 }
 
+// Buffer for the messages with identifier 0x286, 0x373, 0x374, 0x389, 0x418
+twai_message_t msg_buffer[5] = { 0 };
+
 void loop() {
+  can_read_buffered();
+
+  // When transmission status is not P, then we can skip rest of the logic
+  if (msg_buffer[4].data[0] != 80) {
+    return;
+  }
+
   connect_wifi_and_mqtt();
   // shutdown_counter();
 
-  if (!AIOconnected) {
-    delay(100);
-    return;
-  }
-  
-  can_read();
+  can_interval_publish();
   mqtt.loop();
 
 #ifdef DEBUG
@@ -94,6 +99,32 @@ void loop() {
   can_publish(&d_msg);
   delay(1000);
 #endif
+}
+
+void can_interval_publish() {
+  unsigned long now = millis();
+
+  if (lastPublish > now) {
+    lastPublish = now;
+  }
+  if (now - lastPublish < intervalPublish) {
+    return;
+  }
+  lastPublish = now;
+
+  Serial.println("Publishing to MQTT:");
+  // The 5th value is for transmission status so ignore
+  for (int i = 0; i < (5 - 1); i++) {
+    if (msg_buffer[i].identifier != 0) {
+#ifdef DEBUG
+      Serial.print("0x");
+      Serial.print(msg_buffer[i].identifier, HEX);
+      Serial.println();
+#endif
+      can_publish(&msg_buffer[i]);
+      msg_buffer[i].identifier = 0;
+    }
+  }
 }
 
 void can_publish(twai_message_t* msg) {
@@ -108,9 +139,7 @@ void can_publish(twai_message_t* msg) {
   mqtt.publish(topic, (const uint8_t*)&payload, msg->data_length_code * 2, true);
 }
 
-twai_message_t msg_buffer[9] = { 0 };
-
-void can_read() {
+void can_read_buffered() {
   twai_message_t msg;
 
   if (twai_receive(&msg, 0) != ESP_OK) {
@@ -119,36 +148,25 @@ void can_read() {
 
   switch (msg.identifier) {
     case 0x286:
-      msg_buffer[0] = msg;
-      break;
-    case 0x697:
-      msg_buffer[1] = msg;
+      msg_buffer[0] = msg;  // Charger status / inverter temperature
       break;
     case 0x373:
-      msg_buffer[2] = msg;
+      msg_buffer[1] = msg;  // Main Battery volt and current
       break;
     case 0x374:
-      msg_buffer[3] = msg;
+      msg_buffer[2] = msg;  // Main Battery Soc
       break;
     case 0x389:
-      msg_buffer[4] = msg;
+      msg_buffer[3] = msg;  // Charger voltage and current
       break;
-    case 0x6E1:
-      msg_buffer[5] = msg;
-      break;
-    case 0x6E2:
-      msg_buffer[6] = msg;
-      break;
-    case 0x6E3:
-      msg_buffer[7] = msg;
-      break;
-    case 0x6E4:
-      msg_buffer[8] = msg;
+    case 0x418:
+      msg_buffer[4] = msg;  // Transmissin state
       break;
     default:
       return;
   }
 
+#ifdef DEBUG
   Serial.print("0x");
   Serial.print(msg.identifier, HEX);
   Serial.print("\t");
@@ -166,23 +184,7 @@ void can_read() {
     Serial.print(msg.data[i], HEX);
   }
   Serial.println();
-
-  if (lastPublish > millis()) lastPublish = millis();
-  if (millis() - lastPublish < intervalPublish) {
-    return;
-  }
-  lastPublish = millis();
-
-  Serial.println("Publishing to MQTT:");
-  for (int i = 0; i < 9; i++) {
-    if (msg_buffer[i].identifier != 0) {
-      Serial.print("0x");
-      Serial.print(msg_buffer[i].identifier, HEX);
-      Serial.println();
-      can_publish(&msg_buffer[i]);
-      msg_buffer[i].identifier = 0;
-    }
-  }
+#endif
 }
 
 void shutdown_counter() {
