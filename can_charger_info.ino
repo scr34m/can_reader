@@ -13,8 +13,6 @@
 #define TX_PIN 14
 #define CAN_RS 38
 
-#define SECONDS_TO_STAY_ON 5
-
 #define FORCE_ON 17
 #define SENSE_V_DIG 8
 
@@ -41,9 +39,9 @@ bool AIOconnected = false;
 unsigned long intervalPublish = 10000;
 unsigned long lastPublish = millis() - (intervalPublish / 2);
 
-#ifdef DEBUG
-twai_message_t d_msg;
-#endif
+unsigned long lastShutdown;
+bool enableShutdown = false;
+unsigned long delayShutdown = 10000;
 
 void setup() {
   pinMode(BLUE_LED, OUTPUT);
@@ -55,6 +53,7 @@ void setup() {
 
   Serial.begin(USB_SPEED);
   Serial.setTxTimeoutMs(0);  // prevent slow timeouts
+  Serial.println("Starting...");
 
   pinMode(CAN_RS, OUTPUT);    // INPUT (high impedance) = slope control mode, OUTPUT = see next line
   digitalWrite(CAN_RS, LOW);  // LOW = high speed mode, HIGH = low power mode (listen only)
@@ -67,14 +66,6 @@ void setup() {
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   twai_driver_install(&g_config, &t_config, &f_config);
   twai_start();
-
-#ifdef DEBUG
-  d_msg.identifier = 0x111;
-  d_msg.data_length_code = 3;
-  d_msg.data[0] = 0x10;
-  d_msg.data[1] = 0x20;
-  d_msg.data[2] = 0x30;
-#endif
 }
 
 // Buffer for the messages with identifier 0x286, 0x373, 0x374, 0x389, 0x418
@@ -88,17 +79,13 @@ void loop() {
     return;
   }
 
+  shutdown_counter();
+
   connect_wifi_and_mqtt();
-  // shutdown_counter();
 
   can_interval_publish();
-  mqtt.loop();
 
-#ifdef DEBUG
-  d_msg.data[0] += 1;
-  can_publish(&d_msg);
-  delay(1000);
-#endif
+  mqtt.loop();
 }
 
 void can_interval_publish() {
@@ -113,36 +100,76 @@ void can_interval_publish() {
   lastPublish = now;
 
   Serial.println("Publishing to MQTT:");
-  // The 5th value is for transmission status so ignore
-  for (int i = 0; i < (5 - 1); i++) {
+  for (int i = 0; i < 5; i++) {
     if (msg_buffer[i].identifier != 0) {
-#ifdef DEBUG
       Serial.print("0x");
       Serial.print(msg_buffer[i].identifier, HEX);
       Serial.println();
-#endif
-      can_publish(&msg_buffer[i]);
+
+      // Transmission status ignored
+      if (msg_buffer[i].identifier != 0x418) {
+        can_publish(&msg_buffer[i]);
+      }
       msg_buffer[i].identifier = 0;
     }
   }
 }
 
 void can_publish(twai_message_t* msg) {
-  char topic[9];
-  sprintf(topic, "can/%x", msg->identifier);
+  char topic[64];
+  sprintf(topic, "can/%x/raw", msg->identifier);
 
+  // Raw data
   char payload[17] = { 0 };
   for (int i = 0; i < msg->data_length_code; i++) {
     sprintf(payload, "%s%02x", payload, msg->data[i]);
   }
 
   mqtt.publish(topic, (const uint8_t*)&payload, msg->data_length_code * 2, true);
+
+  float current;
+  float voltage;
+
+  // Decoded values
+  switch (msg->identifier) {
+    case 0x286:
+      sprintf(topic, "can/%x/temp", msg->identifier);
+      mqtt.publish(topic, String(msg->data[3] - 40).c_str(), true);
+
+      sprintf(topic, "can/%x/status", msg->identifier);
+      mqtt.publish(topic, String((msg->data[1] & 32) == 32).c_str(), true);
+      break;
+    case 0x373:
+      current = (((((msg->data[2] * 256.0) + msg->data[3])) - 32768)) * 0.01;
+      voltage = (msg->data[4] * 256.0 + msg->data[5]) * 0.1;
+
+      sprintf(topic, "can/%x/current", msg->identifier);
+      mqtt.publish(topic, String(current).c_str(), true);
+
+      sprintf(topic, "can/%x/energy", msg->identifier);
+      mqtt.publish(topic, String(voltage).c_str(), true);
+
+      sprintf(topic, "can/%x/power", msg->identifier);
+      mqtt.publish(topic, String((voltage * current) * 0.001).c_str(), true);
+      break;
+    case 0x374:
+      sprintf(topic, "can/%x/capacity", msg->identifier);
+      mqtt.publish(topic, String((msg->data[1] - 10) * 0.5).c_str(), true);
+      break;
+    case 0x389:
+      sprintf(topic, "can/%x/energy", msg->identifier);
+      mqtt.publish(topic, String(msg->data[1] * 1.0).c_str(), true);
+
+      sprintf(topic, "can/%x/current", msg->identifier);
+      mqtt.publish(topic, String(msg->data[6] * 0.1).c_str(), true);
+      break;
+  }
 }
 
 void can_read_buffered() {
   twai_message_t msg;
 
-  if (twai_receive(&msg, 0) != ESP_OK) {
+  if (twai_receive(&msg, 100) != ESP_OK) {
     return;
   }
 
@@ -188,28 +215,26 @@ void can_read_buffered() {
 }
 
 void shutdown_counter() {
-  static unsigned long timestamp;
-  static bool countdown = false;
   unsigned long now = millis();
 
   if (!digitalRead(SENSE_V_DIG)) {
-    if (countdown == false) {
-      countdown = true;
-      timestamp = now;
+    if (enableShutdown == false) {
+      enableShutdown = true;
+      lastShutdown = now;
       digitalWrite(BLUE_LED, HIGH);
     }
   } else {
-    countdown = false;
+    enableShutdown = false;
     digitalWrite(BLUE_LED, LOW);
   }
-  if (countdown && now - timestamp >= SECONDS_TO_STAY_ON * 1000) {
+  if (enableShutdown && now - lastShutdown >= delayShutdown) {
     digitalWrite(FORCE_ON, LOW);
   }
   digitalWrite(YELLOW_LED, digitalRead(SENSE_V_DIG));
 }
 
 void connect_wifi_and_mqtt() {
-  // The first time the function runs, the WLAN router and MQTT broker
+  // The first time the function runs, the WiFi and MQTT broker
   // are disconnected; therefore set the state machine's initial state
   static byte stateConnection = WIFI_DOWN_MQTT_DOWN;
 
