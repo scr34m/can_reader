@@ -68,8 +68,8 @@ void setup() {
   twai_start();
 }
 
-// Buffer for the messages with identifier 0x286, 0x373, 0x374, 0x389, 0x418
-twai_message_t msg_buffer[5] = { 0 };
+// Buffer for the messages with identifier 0x286, 0x373, 0x374, 0x389, 0x418, 0x412
+twai_message_t msg_buffer[6] = { 0 };
 
 void loop() {
   can_read_buffered();
@@ -100,7 +100,7 @@ void can_interval_publish() {
   lastPublish = now;
 
   Serial.println("Publishing to MQTT:");
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     if (msg_buffer[i].identifier != 0) {
       Serial.print("0x");
       Serial.print(msg_buffer[i].identifier, HEX);
@@ -163,6 +163,10 @@ void can_publish(twai_message_t* msg) {
       sprintf(topic, "can/%x/current", msg->identifier);
       mqtt.publish(topic, String(msg->data[6] * 0.1).c_str(), true);
       break;
+    case 0x412:
+      sprintf(topic, "can/%x/odometer", msg->identifier);
+      mqtt.publish(topic, String((msg->data[2] << 16) + (msg->data[3] << 8) + msg->data[4]).c_str(), true);
+      break;
   }
 }
 
@@ -188,6 +192,9 @@ void can_read_buffered() {
       break;
     case 0x418:
       msg_buffer[4] = msg;  // Transmissin state
+      break;
+    case 0x412:
+      msg_buffer[5] = msg;  // Odometer
       break;
     default:
       return;
