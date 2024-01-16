@@ -2,7 +2,12 @@
 
 #include <WiFi.h>
 #include <PubSubClient.h>
+#include <SPI.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
+#include "RTClib.h"
 #include "driver/twai.h"
 
 #include "config.h"
@@ -34,7 +39,6 @@ PubSubClient mqtt(espClient);
 unsigned long timeConnectStarted;
 unsigned long intervalWiFi = 10000;
 unsigned long intervalMQTT = 10000;
-bool AIOconnected = false;
 
 unsigned long intervalPublish = 10000;
 unsigned long lastPublish = millis() - (intervalPublish / 2);
@@ -43,7 +47,23 @@ unsigned long lastShutdown;
 bool enableShutdown = false;
 unsigned long delayShutdown = 10000;
 
+byte stateConnection = WIFI_DOWN_MQTT_DOWN;
+
+Adafruit_SSD1306 display(128, 32, &Wire, -1);
+int display_update = 1;
+
+hw_timer_t *Timer0_Cfg = NULL;
+
+RTC_DS3231 rtc;
+
+void IRAM_ATTR Timer0_ISR()
+{
+  display_update = 1;
+}
+
 void setup() {
+  Wire.begin(47, 48);
+
   pinMode(BLUE_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(SENSE_V_DIG, INPUT_PULLUP);
@@ -66,16 +86,40 @@ void setup() {
   twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
   twai_driver_install(&g_config, &t_config, &f_config);
   twai_start();
+
+  rtc.begin(&Wire);
+  
+  if (rtc.lostPower()) {
+    Serial.println("RTC lost power, let's set the time!");
+    rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+  }
+
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    Serial.println(F("SSD1306 allocation failed"));
+  }  
+  display.clearDisplay();
+  display.setTextColor(WHITE);
+
+  Timer0_Cfg = timerBegin(0, 80, true);
+  timerAttachInterrupt(Timer0_Cfg, &Timer0_ISR, true);
+  timerAlarmWrite(Timer0_Cfg, 1000 * 1000, true);
+  timerAlarmEnable(Timer0_Cfg);
 }
 
 // Buffer for the messages with identifier 0x286, 0x373, 0x374, 0x389, 0x418, 0x412
 twai_message_t msg_buffer[6] = { 0 };
 
 void loop() {
+  if (display_update) {
+    display_draw();
+    display_update = 0;
+  }
+
   can_read_buffered();
 
   // When transmission status is not P, then we can skip rest of the logic
   if (msg_buffer[4].data[0] != 80) {
+    stateConnection = WIFI_DOWN_MQTT_DOWN;
     return;
   }
 
@@ -86,6 +130,87 @@ void loop() {
   can_interval_publish();
 
   mqtt.loop();
+}
+
+void display_draw()
+{
+  display.clearDisplay();
+
+  display.setCursor(0, 0);
+  display.setTextSize(2);
+
+  int c = (msg_buffer[2].data[1] - 10) * 0.5;
+  display.print(c);
+
+  display.setCursor(128 - 70, 0);
+  DateTime now = rtc.now();
+  if (now.hour() < 10) {
+    display.print(0);
+  }
+  display.print(now.hour());
+  display.print(':');
+  if (now.minute() < 10) {
+    display.print(0);
+  }
+  display.print(now.minute());
+
+  display.setTextSize(1);
+  display.setCursor(0, 24);
+
+  char t = '-';
+  switch (msg_buffer[4].data[0]) {
+    case 80:
+      t = 'P';
+      break;
+    case 82:
+      t = 'R';
+      break;
+    case 78:
+      t = 'N';
+      break;
+    case 68:
+      t = 'D';
+      break;
+  }
+  display.print("Tr: ");
+  display.print(t);
+  display.print(' ');
+
+  char w = '-';
+  char m = '-';
+  switch (stateConnection) {
+    case WIFI_DOWN_MQTT_DOWN:
+      w = 'D';
+      m = 'D';
+      break;
+    case WIFI_STARTING_MQTT_DOWN:
+      w = 'S';
+      m = 'D';
+      break;
+    case WIFI_UP_MQTT_DOWN:
+      w = 'W';
+      m = 'W';
+      break;
+   case WIFI_UP_MQTT_STARTING:
+      w = 'W';
+      m = 'W';
+      break;
+    case WIFI_UP_MQTT_UP:
+      w = 'W';
+      m = 'W';
+      break;
+    case WIFI_UP_MQTT_UP_AIO:
+      w = 'A';
+      m = 'A';
+      break;
+  }
+  display.print("Wi: ");
+  display.print(w);
+  display.print(' ');
+  display.print("MQ: ");
+  display.print(m);
+
+  display.display();
 }
 
 void can_interval_publish() {
@@ -241,15 +366,10 @@ void shutdown_counter() {
 }
 
 void connect_wifi_and_mqtt() {
-  // The first time the function runs, the WiFi and MQTT broker
-  // are disconnected; therefore set the state machine's initial state
-  static byte stateConnection = WIFI_DOWN_MQTT_DOWN;
-
   // Next, check if the previously successful WiFi and MQTT broker connection was dropped
   if (WiFi.status() == WL_DISCONNECTED && stateConnection == WIFI_UP_MQTT_UP_AIO) {
     Serial.println("Restart WLAN connection");
     stateConnection = WIFI_DOWN_MQTT_DOWN;
-    AIOconnected = false;
   }
 
   switch (stateConnection) {
@@ -259,8 +379,8 @@ void connect_wifi_and_mqtt() {
         Serial.println("Start WiFi connection");
         WiFi.begin(ssid, password);
         timeConnectStarted = millis();
-        stateConnection = WIFI_STARTING_MQTT_DOWN;
       }
+      stateConnection = WIFI_STARTING_MQTT_DOWN;
       break;
 
     // If the WiFi connection was started
@@ -282,13 +402,13 @@ void connect_wifi_and_mqtt() {
       if ((WiFi.status() == WL_CONNECTED) && !mqtt.connected()) {
         Serial.println("WiFi connected. Start MQTT connection");
         timeConnectStarted = millis();
-        stateConnection = WIFI_UP_MQTT_STARTING;
       }
+      stateConnection = WIFI_UP_MQTT_STARTING;
       break;
 
     // If the MQTT broker connection was started
     case WIFI_UP_MQTT_STARTING:
-      if (mqtt.connect("esp32-client-can-bus")) {
+      if (!mqtt.connected() && mqtt.connect("esp32-client-can-bus")) {
         stateConnection = WIFI_UP_MQTT_UP;
       } else if (millis() - timeConnectStarted >= intervalMQTT) {
         Serial.println("Retry MQTT connection");
@@ -299,9 +419,6 @@ void connect_wifi_and_mqtt() {
     // If both the WiFi and MQTT broker connections were established
     case WIFI_UP_MQTT_UP:
       Serial.println("WiFi and MQTT connected");
-
-      // Toggle flag to enable publishing and subscribing
-      AIOconnected = true;
 
       stateConnection = WIFI_UP_MQTT_UP_AIO;
       break;
