@@ -55,6 +55,8 @@ int display_update = 1;
 hw_timer_t *Timer0_Cfg = NULL;
 
 RTC_DS3231 rtc;
+const char* ntpServer = "0.hu.pool.ntp.org";
+const char* tzInfo = "CET-1CEST,M3.5.0,M10.5.0/3";
 
 void IRAM_ATTR Timer0_ISR()
 {
@@ -420,6 +422,8 @@ void connect_wifi_and_mqtt() {
     case WIFI_UP_MQTT_UP:
       Serial.println("WiFi and MQTT connected");
 
+      adjust_rtc();
+
       stateConnection = WIFI_UP_MQTT_UP_AIO;
       break;
 
@@ -427,4 +431,16 @@ void connect_wifi_and_mqtt() {
       // The main loop
       break;
   }
+}
+
+void adjust_rtc() {
+  Serial.print("uses ntp server: ");
+  Serial.println(ntpServer);
+  configTzTime(tzInfo, ntpServer);
+  struct tm timeinfo;  // time struct
+  if(!getLocalTime(&timeinfo)){
+    Serial.println("failed to obtain time");
+    return;
+  }
+  rtc.adjust(DateTime(timeinfo.tm_year, timeinfo.tm_mon, timeinfo.tm_mday, timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec));
 }
