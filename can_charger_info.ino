@@ -1,4 +1,7 @@
 // https://esp32.com/viewtopic.php?t=16109
+// https://github.com/MagnusThome/RejsaCAN-ESP32
+// build with: ESP32S3Dev v2.0.17 and Arduino ESP21 Boards 2.0.13
+// USB CDC on Boot: Enable
 
 #include <WiFi.h>
 #include <PubSubClient.h>
@@ -25,6 +28,8 @@
 #define YELLOW_LED 11
 // Yellow LED show status of power voltage, over or under threshold
 // Blue LED turns on during countdown delay until board is shut off
+
+#define DISPLAY 1
 
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -91,11 +96,13 @@ void setup() {
 
   rtc.begin(&Wire);
 
+#ifdef DISPLAY
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
     Serial.println(F("SSD1306 allocation failed"));
   }  
   display.clearDisplay();
   display.setTextColor(WHITE);
+#endif
 
   Timer0_Cfg = timerBegin(0, 80, true);
   timerAttachInterrupt(Timer0_Cfg, &Timer0_ISR, true);
@@ -107,10 +114,12 @@ void setup() {
 twai_message_t msg_buffer[6] = { 0 };
 
 void loop() {
+#ifdef DISPLAY
   if (display_update) {
     display_draw();
     display_update = 0;
   }
+#endif
 
   can_read_buffered();
 
